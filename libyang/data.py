@@ -110,6 +110,63 @@ def parser_flags(
     return flags
 
 
+def diff_flags(
+    with_defaults: bool = False,
+    no_siblings: bool = False,
+) -> int:
+    flags = 0
+    if with_defaults:
+        flags |= lib.LYD_DIFFOPT_WITHDEFAULTS
+    if no_siblings:
+        flags |= lib.LYD_DIFFOPT_NOSIBLINGS
+    return flags
+
+
+# -------------------------------------------------------------------------------------
+class DDiff:
+    """
+    Data tree diff
+    """
+
+    DELETED = lib.LYD_DIFF_DELETED
+    CHANGED = lib.LYD_DIFF_CHANGED
+    CREATED = lib.LYD_DIFF_CREATED
+    MOVEDAFTER1 = lib.LYD_DIFF_MOVEDAFTER1
+    MOVEDAFTER2 = lib.LYD_DIFF_MOVEDAFTER2
+
+    DIFF_TYPES = {
+        DELETED: "deleted",
+        CHANGED: "changed",
+        CREATED: "created",
+        MOVEDAFTER1: "movedafter1",
+        MOVEDAFTER2: "movedafter2",
+    }
+
+    __slots__ = ("dtype", "first", "second")
+
+    def __init__(self, dtype, first: Optional["DNode"], second: Optional["DNode"]):
+        """
+        :arg dtype:
+            The type of the diff
+        :arg first:
+            The first DNode
+        :arg second:
+            The second DNode
+        """
+        self.dtype = dtype
+        self.first = first
+        self.second = second
+
+    def diff_type(self) -> str:
+        """Get diff type as string"""
+        return self.DIFF_TYPES.get(self.dtype, "unknown")
+
+    def __repr__(self) -> str:
+        return "<libyang.data.DDiff {} first={} second={}>".format(
+            self.diff_type(), self.first, self.second
+        )
+
+
 # -------------------------------------------------------------------------------------
 class DNode:
     """
@@ -184,7 +241,7 @@ class DNode:
             raise self.context.error("cannot find path")
         try:
             for i in range(node_set.number):
-                yield DNode.new(self.context, node_set.d[i])
+                yield DNode.new(self.context, node_set.set.d[i])
         finally:
             lib.ly_set_free(node_set)
 
@@ -223,6 +280,31 @@ class DNode:
         ret = lib.lyd_validate(node_p, flags, ffi.NULL)
         if ret != 0:
             raise self.context.error("validation failed")
+
+    def diff(
+        self,
+        other: "DNode",
+        no_siblings: bool = False,
+        with_defaults: bool = False,
+    ) -> Iterator[DDiff]:
+        flags = diff_flags(no_siblings=no_siblings, with_defaults=with_defaults)
+        dlist = lib.lyd_diff(self.cdata, other.cdata, flags)
+        if not dlist:
+            raise self.context.error("diff failed")
+
+        i = 0
+        try:
+            while dlist.type[i] != lib.LYD_DIFF_END:
+                first = None
+                if dlist.first[i]:
+                    first = self.new(self.context, dlist.first[i])
+                second = None
+                if dlist.second[i]:
+                    second = self.new(self.context, dlist.second[i])
+                yield DDiff(dlist.type[i], first, second)
+                i += 1
+        finally:
+            lib.lyd_free_diff(dlist)
 
     def merge(
         self,
@@ -513,9 +595,7 @@ class DNode:
         cdata = ffi.cast("struct lyd_node *", cdata)
         nodecls = cls.NODETYPE_CLASS.get(cdata.schema.nodetype, None)
         if nodecls is None:
-            raise NotImplementedError(
-                "node type %s not implemented" % cdata.schema.nodetype
-            )
+            raise TypeError("node type %s not implemented" % cdata.schema.nodetype)
         return nodecls(context, cdata)
 
 
@@ -740,7 +820,7 @@ def dict_to_dnode(
     def _to_dnode(_dic, _schema, _parent=ffi.NULL, in_rpc_output=False):
         for key in _dic_keys(_dic, _schema):
             if ":" in key:
-                prefix, name = name.split(":")
+                prefix, name = key.split(":")
             else:
                 prefix, name = None, key
 
