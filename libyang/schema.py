@@ -102,6 +102,13 @@ class Module:
     def children(self, types: Optional[Tuple[int, ...]] = None) -> Iterator["SNode"]:
         return iter_children(self.context, self.cdata, types=types)
 
+    def augment_size(self):
+        return self.cdata.augment_size
+
+    def augments(self):
+        for i in range(self.cdata.augment_size):
+            yield Augment(self.context, self.cdata.augment[i])
+
     def __str__(self) -> str:
         return self.name()
 
@@ -276,7 +283,6 @@ class Extension:
     def __str__(self):
         return self.name()
 
-
 # -------------------------------------------------------------------------------------
 class Type:
 
@@ -380,6 +386,12 @@ class Type:
         lref = self.cdata.info.lref
         return Type(self.context, ffi.addressof(lref.target.type))
 
+    def leafref_path(self) -> Tuple[str, int]:
+        if self.cdata.base != self.LEAFREF:
+            return
+        lref = self.cdata.info.lref
+        return c2str(lref.path), lref.req
+
     def union_types(self) -> Iterator["Type"]:
         if self.cdata.base != self.UNION:
             return
@@ -398,6 +410,31 @@ class Type:
         for i in range(t.info.enums.count):
             e = t.info.enums.enm[i]
             yield c2str(e.name), c2str(e.dsc)
+
+    def idents(self) -> Iterator[Tuple[str, Optional[str]]]:
+        if self.cdata.base != self.IDENT:
+            return
+        t = self.cdata
+        while t.info.ident.count == 0:
+            t = ffi.addressof(t.der.type)
+
+        for i in range(t.info.ident.count):
+            e = t.info.ident.ref[i]
+            yield c2str(e.name), c2str(e.dsc)
+
+    def candidate_idents(self) -> Iterator[Tuple[str, Optional[str]]]:
+        if self.cdata.base != self.IDENT:
+            return
+        t = self.cdata
+        while t.info.ident.count == 0:
+            t = ffi.addressof(t.der.type)
+        for i in range(t.info.ident.count):
+            e = t.info.ident.ref[i]
+
+            for s in range(e.der.number):
+                x = e.der.set.s[s]
+                if not x: continue
+                yield "{}:{}".format(c2str(x.module.name), c2str(x.name)), c2str(x.dsc)
 
     def all_enums(self) -> Iterator[Tuple[str, Optional[str]]]:
         for b in self.get_bases():
@@ -730,7 +767,7 @@ class SNode:
     RPC = lib.LYS_RPC
     ACTION = lib.LYS_ACTION
     INPUT = lib.LYS_INPUT
-    OUTPUT = lib.LYS_OUTPUT
+    OUTPUT = lib.LYS_OUTPUT,
     KEYWORDS = {
         CONTAINER: "container",
         LEAF: "leaf",
@@ -867,6 +904,99 @@ class SNode:
 
 
 # -------------------------------------------------------------------------------------
+class Augment:
+
+    __slots__ = ("context", "cdata")
+
+    def __init__(self, context: "libyang.Context", cdata):
+        self.context = context
+        self.cdata = cdata  # C type: "struct lys_node_augment *"
+
+    @property
+    def _feature(self):
+        deprecated("_feature", "cdata", "2.0.0")
+        return self.cdata
+
+    def target_name(self) -> str:
+        return c2str(self.cdata.target_name)
+
+    def description(self) -> Optional[str]:
+        return c2str(self.cdata.dsc)
+
+    def reference(self) -> Optional[str]:
+        return c2str(self.cdata.ref)
+
+    def state(self) -> bool:
+        return bool(self.cdata.flags & lib.LYS_FENABLED)
+
+    def deprecated(self) -> bool:
+        return bool(self.cdata.flags & lib.LYS_STATUS_DEPRC)
+
+    def obsolete(self) -> bool:
+        return bool(self.cdata.flags & lib.LYS_STATUS_OBSLT)
+
+    def if_features(self) -> Iterator["IfFeatureExpr"]:
+        for i in range(self.cdata.iffeature_size):
+            yield IfFeatureExpr(self.context, self.cdata.iffeature[i])
+
+    def when_condition(self) -> str:
+        if self.cdata.when == ffi.NULL:
+            return None
+        return c2str(self.cdata.when.cond)
+
+    def when_description(self) -> str:
+        if self.cdata.when == NULL:
+            return None
+        return c2str(self.cdata.when.dsc)
+
+    def when_ref(self) -> str:
+        if self.cdata.when == NULL:
+            return None
+        return c2str(self.cdata.when.ref)
+
+    def module(self) -> Module:
+        module_p = lib.lys_main_module(self.cdata.module)
+        if not module_p:
+            raise self.context.error("cannot get module")
+        return Module(self.context, module_p)
+
+    def __str__(self):
+        return self.target_name()
+
+    def __iter__(self) -> Iterator["SNode"]:
+        return self.children()
+
+    def children(self, types: Optional[Tuple[int, ...]] = None) -> Iterator["SNode"]:
+
+        if types is None:
+            types = (
+                lib.LYS_ACTION,
+                lib.LYS_CONTAINER,
+                lib.LYS_LIST,
+                lib.LYS_RPC,
+                lib.LYS_LEAF,
+                lib.LYS_LEAFLIST
+            )
+
+        def _skip(node) -> bool:
+            if node.nodetype not in types:
+                return True
+            if node.nodetype != lib.LYS_LEAF:
+                return False
+            leaf = ffi.cast("struct lys_node_leaf *", node)
+            if lib.lys_is_key(leaf, ffi.NULL):
+                return True
+            return False
+
+        c = self.cdata.child
+        while c:
+            if not _skip(c) and c.parent == self.cdata:
+                yield SNode.new(self.context, c)
+            c = c.next
+
+
+
+# -------------------------------------------------------------------------------------
 @SNode.register(SNode.LEAF)
 class SLeaf(SNode):
 
@@ -898,6 +1028,21 @@ class SLeaf(SNode):
     def must_conditions(self) -> Iterator[str]:
         for i in range(self.cdata_leaf.must_size):
             yield c2str(self.cdata_leaf.must[i].expr)
+
+    def when_condition(self) -> str:
+        if self.cdata_leaf.when == ffi.NULL:
+            return None
+        return c2str(self.cdata_leaf.when.cond)
+
+    def when_description(self) -> str:
+        if self.cdata_leaf.when == NULL:
+            return None
+        return c2str(self.cdata_leaf.when.dsc)
+
+    def when_ref(self) -> str:
+        if self.cdata_leaf.when == NULL:
+            return None
+        return c2str(self.cdata_leaf.when.ref)
 
     def __str__(self):
         return "%s %s" % (self.name(), self.type().name())
@@ -935,6 +1080,22 @@ class SLeafList(SNode):
         for i in range(self.cdata_leaflist.must_size):
             yield c2str(self.cdata_leaflist.must[i].expr)
 
+    def when_condition(self) -> str:
+        if self.cdata_leaflist.when == ffi.NULL:
+            return None
+
+        return c2str(self.cdata_leaflist.when.cond)
+
+    def when_description(self) -> str:
+        if self.cdata_leaflist.when == NULL:
+            return None
+        return c2str(self.cdata_leaflist.when.dsc)
+
+    def when_ref(self) -> str:
+        if self.cdata_leaflist.when == NULL:
+            return None
+        return c2str(self.cdata_leaflist.when.ref)
+
     def __str__(self):
         return "%s %s" % (self.name(), self.type().name())
 
@@ -960,6 +1121,23 @@ class SContainer(SNode):
     def must_conditions(self) -> Iterator[str]:
         for i in range(self.cdata_container.must_size):
             yield c2str(self.cdata_container.must[i].expr)
+
+
+    def when_condition(self) -> str:
+        if self.cdata_container.when == ffi.NULL:
+            return None
+
+        return c2str(self.cdata_container.when.cond)
+
+    def when_description(self) -> str:
+        if self.cdata_container.when == NULL:
+            return None
+        return c2str(self.cdata_container.when.dsc)
+
+    def when_ref(self) -> str:
+        if self.cdata_container.when == NULL:
+            return None
+        return c2str(self.cdata_container.when.ref)
 
     def __iter__(self) -> Iterator[SNode]:
         return self.children()
@@ -1002,6 +1180,22 @@ class SList(SNode):
     def must_conditions(self) -> Iterator[str]:
         for i in range(self.cdata_list.must_size):
             yield c2str(self.cdata_list.must[i].expr)
+
+    def when_condition(self) -> str:
+        if self.cdata_list.when == ffi.NULL:
+            return None
+
+        return c2str(self.cdata_list.when.cond)
+
+    def when_description(self) -> str:
+        if self.cdata_list.when == ffi.NULL:
+            return None
+        return c2str(self.cdata_list.when.dsc)
+
+    def when_ref(self) -> str:
+        if self.cdata_list.when == ffi.NULL:
+            return None
+        return c2str(self.cdata_list.when.ref)
 
     def __str__(self):
         return "%s [%s]" % (self.name(), ", ".join(k.name() for k in self.keys()))
@@ -1070,7 +1264,7 @@ def iter_children(
             lib.LYS_LIST,
             lib.LYS_RPC,
             lib.LYS_LEAF,
-            lib.LYS_LEAFLIST,
+            lib.LYS_LEAFLIST
         )
 
     def _skip(node) -> bool:
@@ -1091,7 +1285,15 @@ def iter_children(
     else:
         module = ffi.NULL
 
+    if ffi.typeof(parent) == ffi.typeof("struct lys_node_augment"):
+        module = parent
+        parent = ffi.NULL
+
     child = lib.lys_getnext(ffi.NULL, parent, module, options)
+
+    if ffi.typeof(parent) == ffi.typeof("struct lys_node_augment"):
+        print(child)
+
     while child:
         if not _skip(child):
             yield SNode.new(context, child)

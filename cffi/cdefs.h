@@ -62,8 +62,10 @@ struct lys_module {
 	const char *filepath;
 	uint8_t rev_size;
 	uint8_t features_size;
+	uint8_t augment_size;
 	struct lys_revision *rev;
 	struct lys_feature *features;
+	struct lys_node_augment *augment;
 	...;
 };
 
@@ -84,6 +86,25 @@ struct lys_feature {
 	uint16_t flags;
 	uint8_t iffeature_size;
 	struct lys_iffeature *iffeature;
+	struct lys_module *module;
+	...;
+};
+
+struct lys_node_augment {
+    const char *target_name;
+    const char *dsc;
+    const char *ref;
+    uint16_t flags;
+
+    uint8_t ext_size;
+	uint8_t iffeature_size;
+	struct lys_iffeature *iffeature;
+	struct lys_ext_instance **ext;
+
+	struct lys_node *parent;
+	struct lys_node *child;
+	struct lys_when *when;
+
 	struct lys_module *module;
 	...;
 };
@@ -171,6 +192,29 @@ struct lys_type_enum {
 	...;
 };
 
+
+struct lys_ident;
+
+struct lys_ident {
+    const char *name;
+    const char *dsc;
+    const char *ref;
+    uint8_t base_size;
+    struct lys_ident **base;
+    struct ly_set *der;
+    ...;
+};
+
+struct lys_type_info_ident {
+    struct lys_ident **ref;
+    unsigned int count;
+};
+
+struct lys_type_info_inst {
+    unsigned char req;
+    ...;
+};
+
 struct lys_type_info_enums {
 	struct lys_type_enum *enm;
 	unsigned int count;
@@ -204,6 +248,8 @@ union lys_type_info {
 	struct lys_type_info_bits bits;
 	struct lys_type_info_dec64 dec64;
 	struct lys_type_info_enums enums;
+	struct lys_type_info_ident ident;
+	struct lys_type_info_inst inst;
 	struct lys_type_info_num num;
 	struct lys_type_info_lref lref;
 	struct lys_type_info_str str;
@@ -270,22 +316,37 @@ struct lys_node {
 	uint16_t flags;
 	uint8_t ext_size;
 	uint8_t iffeature_size;
+	struct lys_module *module;
 	struct lys_ext_instance **ext;
 	struct lys_iffeature *iffeature;
 	LYS_NODE nodetype;
+    struct lys_node *parent;
+	struct lys_node *next;
+	struct lys_node *prev;
 	...;
 };
+
+struct lys_when {
+    const char *cond;                /**< specified condition (mandatory) */
+    const char *dsc;                 /**< description (optional) */
+    const char *ref;                 /**< reference (optional) */
+    ...;
+};
+
 
 struct lys_node_container {
 	uint8_t must_size;
 	struct lys_restr *must;
+	struct lys_when *when;
 	const char *presence;
 	...;
 };
 
+
 struct lys_node_leaf {
 	uint8_t must_size;
 	struct lys_restr *must;
+	struct lys_when *when;
 	struct lys_type type;
 	const char *units;
 	const char *dflt;
@@ -295,6 +356,7 @@ struct lys_node_leaf {
 struct lys_node_leaflist {
 	uint8_t must_size;
 	struct lys_restr *must;
+	struct lys_when *when;
 	struct lys_type type;
 	const char *units;
 	uint32_t min;
@@ -307,6 +369,7 @@ struct lys_node_leaflist {
 struct lys_node_list {
 	uint8_t must_size;
 	struct lys_restr *must;
+	struct lys_when *when;
 	uint8_t keys_size;
 	struct lys_node_leaf **keys;
 	uint32_t min;
